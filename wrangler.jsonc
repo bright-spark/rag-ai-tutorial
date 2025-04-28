@@ -13,16 +13,10 @@
 	"ai": {
 		"binding": "AI"
 	},
-	/*"vectorize": [
-    {
-      "binding": "VECTOR_INDEX",
-      "index_name": "vector-index"
-    }
-  	],*/
 	"vectorize": [
 		{
 			"binding": "VECTORIZE",
-			"index_name": "embeddings-index"
+			"index_name": "vector-index"
 		}
 	],	
 	"d1_databases": [
