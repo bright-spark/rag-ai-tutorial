@@ -159,6 +159,9 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 				`RecursiveCharacterTextSplitter generated ${texts.length} chunks`
 			);
 		
+			let successCount = 0;
+			let errorCount = 0;
+			
 			for (const index in texts) {
 				const text = texts[index];
 				try {
@@ -229,16 +232,35 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 					});
 					
 					console.log(`Successfully processed chunk ${parseInt(index) + 1}/${texts.length}`);
+					successCount++;
 				} catch (chunkError) {
 					console.error(`Error processing chunk ${parseInt(index) + 1}/${texts.length}: ${chunkError.message}`);
+					errorCount++;
 					// Continue with the next chunk instead of failing the entire workflow
 				}
 			}
 			
-			return { success: true, message: `Processed ${texts.length} chunks successfully` };
+			// Log final results
+			console.log(`Workflow completed: ${successCount} successful, ${errorCount} failed out of ${texts.length} chunks`);
+			
+			// Return a result object that won't cause an exception
+			return {
+				success: true,
+				message: `Processed ${texts.length} chunks: ${successCount} successful, ${errorCount} failed`,
+				stats: {
+					total: texts.length,
+					successful: successCount,
+					failed: errorCount
+				}
+			};
 		} catch (error) {
 			console.error(`RAGWorkflow error: ${error.message}`);
-			throw error;
+			// Instead of throwing, return an error result
+			return {
+				success: false,
+				message: `Workflow failed: ${error.message}`,
+				error: error.message
+			};
 		}
 	}
 }
