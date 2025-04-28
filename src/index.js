@@ -729,6 +729,75 @@ app.get("/abort", async (c) => {
 	}
 });
 
+app.get("/status", async (c) => {
+	try {
+		console.log("Status check requested");
+		
+		// Get database record count
+		console.log("Getting database record count...");
+		const dbCountQuery = "SELECT COUNT(*) as count FROM notes";
+		const dbResult = await c.env.DB.prepare(dbCountQuery).first();
+		const dbRecordCount = dbResult ? dbResult.count : 0;
+		console.log(`Database record count: ${dbRecordCount}`);
+		
+		// Get vector count
+		console.log("Getting vector count...");
+		let vectorCount = 0;
+		try {
+			// Create a valid query vector with 768 dimensions (all zeros)
+			const emptyVector = new Array(768).fill(0);
+			
+			// Query with a large topK to get all vectors
+			const vectorResult = await c.env.VECTORIZE.query(emptyVector, { topK: 10000 });
+			if (vectorResult && vectorResult.matches) {
+				vectorCount = vectorResult.matches.length;
+			}
+		} catch (vectorError) {
+			console.error("Error getting vector count:", vectorError);
+		}
+		console.log(`Vector count: ${vectorCount}`);
+		
+		// Get model information
+		console.log("Getting model information...");
+		const models = {
+			embedding: "@cf/baai/bge-base-en-v1.5",
+			llm: "@cf/meta/llama-3-8b-instruct"
+		};
+		
+		// Get system information
+		const systemInfo = {
+			platform: "Cloudflare Workers",
+			region: c.env.CF_REGION || "Unknown",
+			environment: c.env.CF_ENVIRONMENT || "Unknown"
+		};
+		
+		// Prepare the response
+		const status = {
+			success: true,
+			timestamp: new Date().toISOString(),
+			database: {
+				recordCount: dbRecordCount
+			},
+			vectorize: {
+				vectorCount: vectorCount
+			},
+			models: models,
+			system: systemInfo
+		};
+		
+		console.log("Status check completed successfully");
+		return Response.json(status);
+		
+	} catch (error) {
+		console.error("Error in /status endpoint:", error);
+		return Response.json({
+			success: false,
+			message: `Error getting status: ${error.message}`,
+			error: error.message
+		}, { status: 500 });
+	}
+});
+
 app.onError((err, c) => {
 	console.error("======= Global Error Caught ======");
 	console.error("Error Message:", err?.message);
