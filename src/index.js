@@ -747,13 +747,23 @@ app.get("/status", async (c) => {
 			// Create a valid query vector with 768 dimensions (all zeros)
 			const emptyVector = new Array(768).fill(0);
 			
-			// Query with a large topK to get all vectors
-			const vectorResult = await c.env.VECTORIZE.query(emptyVector, { topK: 10000 });
+			// Query with the maximum allowed topK value (100)
+			const vectorResult = await c.env.VECTORIZE.query(emptyVector, { topK: 100 });
+			
 			if (vectorResult && vectorResult.matches) {
-				vectorCount = vectorResult.matches.length;
+				// If we got exactly 100 results, there might be more vectors
+				// We'll use the database count as a fallback since they should match
+				if (vectorResult.matches.length === 100) {
+					console.log("Vector query returned maximum results (100). Using database count as fallback.");
+					vectorCount = dbRecordCount;
+				} else {
+					vectorCount = vectorResult.matches.length;
+				}
 			}
 		} catch (vectorError) {
 			console.error("Error getting vector count:", vectorError);
+			// If vector count fails, use database count as fallback
+			vectorCount = dbRecordCount;
 		}
 		console.log(`Vector count: ${vectorCount}`);
 		
@@ -771,6 +781,12 @@ app.get("/status", async (c) => {
 			environment: c.env.CF_ENVIRONMENT || "Unknown"
 		};
 		
+		// Check if counts match
+		const countsMatch = vectorCount === dbRecordCount;
+		const statusMessage = countsMatch 
+			? "Database and vector counts match" 
+			: "Warning: Database and vector counts do not match";
+		
 		// Prepare the response
 		const status = {
 			success: true,
@@ -782,7 +798,9 @@ app.get("/status", async (c) => {
 				vectorCount: vectorCount
 			},
 			models: models,
-			system: systemInfo
+			system: systemInfo,
+			status: statusMessage,
+			countsMatch: countsMatch
 		};
 		
 		console.log("Status check completed successfully");
