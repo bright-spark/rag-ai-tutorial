@@ -146,13 +146,28 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 			const env = this.env;
 			const { text } = event.payload;
 			
+			// Validate input
+			if (!text || typeof text !== 'string') {
+				console.error('Invalid input: text is missing or not a string');
+				return {
+					success: false,
+					message: 'Invalid input: text is missing or not a string',
+					error: 'INVALID_INPUT'
+				};
+			}
+			
 			// Log the incoming text for debugging
 			console.log(`Processing text: ${text.substring(0, 50)}...`);
 			
 			let texts = await step.do("split text", async () => {
-				const splitter = new RecursiveCharacterTextSplitter();
-				const output = await splitter.createDocuments([text]);
-				return output.map((doc) => doc.pageContent);
+				try {
+					const splitter = new RecursiveCharacterTextSplitter();
+					const output = await splitter.createDocuments([text]);
+					return output.map((doc) => doc.pageContent);
+				} catch (splitError) {
+					console.error(`Text splitting error: ${splitError.message}`);
+					throw new Error(`Failed to split text: ${splitError.message}`);
+				}
 			});
 		
 			console.log(
@@ -161,6 +176,7 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 		
 			let successCount = 0;
 			let errorCount = 0;
+			let errors = [];
 			
 			for (const index in texts) {
 				const text = texts[index];
@@ -234,7 +250,13 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 					console.log(`Successfully processed chunk ${parseInt(index) + 1}/${texts.length}`);
 					successCount++;
 				} catch (chunkError) {
-					console.error(`Error processing chunk ${parseInt(index) + 1}/${texts.length}: ${chunkError.message}`);
+					const errorMessage = `Error processing chunk ${parseInt(index) + 1}/${texts.length}: ${chunkError.message}`;
+					console.error(errorMessage);
+					errors.push({
+						chunk: parseInt(index) + 1,
+						error: chunkError.message,
+						text: text.substring(0, 50) + '...'
+					});
 					errorCount++;
 					// Continue with the next chunk instead of failing the entire workflow
 				}
@@ -242,24 +264,30 @@ export class RAGWorkflow extends WorkflowEntrypoint {
 			
 			// Log final results
 			console.log(`Workflow completed: ${successCount} successful, ${errorCount} failed out of ${texts.length} chunks`);
+			if (errors.length > 0) {
+				console.error('Errors encountered:', JSON.stringify(errors, null, 2));
+			}
 			
 			// Return a result object that won't cause an exception
 			return {
-				success: true,
+				success: successCount > 0, // Consider it a success if at least one chunk was processed
 				message: `Processed ${texts.length} chunks: ${successCount} successful, ${errorCount} failed`,
 				stats: {
 					total: texts.length,
 					successful: successCount,
 					failed: errorCount
-				}
+				},
+				errors: errors.length > 0 ? errors : undefined
 			};
 		} catch (error) {
 			console.error(`RAGWorkflow error: ${error.message}`);
+			console.error('Stack trace:', error.stack);
 			// Instead of throwing, return an error result
 			return {
 				success: false,
 				message: `Workflow failed: ${error.message}`,
-				error: error.message
+				error: error.message,
+				stack: error.stack
 			};
 		}
 	}
