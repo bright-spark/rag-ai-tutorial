@@ -470,6 +470,62 @@ app.get("/bootstrap", async (c) => {
 	}
 });
 
+app.get("/abort", async (c) => {
+	try {
+		// Clear the vectorize vector index
+		console.log("Clearing vectorize vector index...");
+		try {
+			// Try to get all vectors first
+			const allVectors = await c.env.VECTORIZE.query([], { topK: 100 });
+			if (allVectors && allVectors.matches && allVectors.matches.length > 0) {
+				const vectorIds = allVectors.matches.map(match => match.id);
+				await c.env.VECTORIZE.deleteByIds(vectorIds);
+				console.log(`Deleted ${vectorIds.length} vectors from the index.`);
+			} else {
+				console.log("No vectors found in the index to delete.");
+			}
+		} catch (vectorError) {
+			console.error("Error clearing vectorize index:", vectorError);
+		}
+		console.log("Vectorize vector index cleared successfully.");
+
+		// Clear the database
+		console.log("Clearing database...");
+		const deleteQuery = "DELETE FROM notes";
+		await c.env.DB.prepare(deleteQuery).run();
+		console.log("Database cleared successfully.");
+
+		// Get the wrangler tail
+		const tailResponse = await fetch('https://api.cloudflare.com/client/v4/accounts/58b1b19c68acaef9ec1347796c8ef5dc/workers/scripts/rag-ai-tutorial/tail', {
+			method: 'GET',
+			headers: {
+				'Authorization': `Bearer ${c.env.CF_API_TOKEN}`,
+				'Content-Type': 'application/json'
+			}
+		});
+
+		if (!tailResponse.ok) {
+			throw new Error(`Failed to get wrangler tail: ${tailResponse.status} ${tailResponse.statusText}`);
+		}
+
+		const tailData = await tailResponse.json();
+		
+		return Response.json({
+			success: true,
+			message: "All processes stopped and database cleared",
+			tail: tailData
+		});
+
+	} catch (error) {
+		console.error("Error in /abort endpoint:", error);
+		return Response.json({
+			success: false,
+			message: `Error stopping processes: ${error.message}`,
+			error: error.message
+		}, { status: 500 });
+	}
+});
+
 app.onError((err, c) => {
 	console.error("======= Global Error Caught ======");
 	console.error("Error Message:", err?.message);
