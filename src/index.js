@@ -272,7 +272,7 @@ app.get("/", async (c) => {
 	return c.text(answer);
 });
 
-app.post("/injest", async (c) => {
+app.get("/bootstrap", async (c) => {
 	try {
 		// First, clear the vectorize vector index
 		console.log("Clearing vectorize vector index...");
