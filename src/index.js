@@ -442,7 +442,8 @@ app.get("/bootstrap", async (c) => {
 
 		console.log(`Total text snippets to process: ${textsToInsert.length}`);
 
-		const batchSize = 50; // Process in smaller batches for database operations
+		// Reduce batch size to avoid hitting rate limits
+		const batchSize = 10; // Smaller batch size to reduce API calls
 		let totalInserted = 0;
 
 		for (let i = 0; i < textsToInsert.length; i += batchSize) {
@@ -460,25 +461,48 @@ app.get("/bootstrap", async (c) => {
 			const batch = textsToInsert.slice(i, i + batchSize);
 			console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: items ${i + 1} to ${Math.min(i + batchSize, textsToInsert.length)}`);
 
-			// Process each text in the batch
-			for (const text of batch) {
-				// Check if the process has been cancelled
-				if (isCancelled) {
-					console.log("Bootstrap process was cancelled during text processing.");
-					return Response.json({ 
-						success: false, 
-						totalTextsInserted: totalInserted,
-						message: "Bootstrap process was cancelled during text processing.",
-						cancelled: true
-					});
+			// Process the batch directly instead of making individual API calls
+			try {
+				// Insert all texts in the batch directly into the database
+				const placeholders = batch.map(() => "(?)").join(", ");
+				const insertQuery = `INSERT INTO notes (text) VALUES ${placeholders} RETURNING *`;
+				
+				// Execute the query with all texts as parameters
+				const { results } = await c.env.DB.prepare(insertQuery).bind(...batch).run();
+				
+				if (!results || results.length === 0) {
+					throw new Error("Failed to insert texts: No results returned");
 				}
 				
-				// Use the same method as in the RAG workflow to insert into the database
-				await c.env.RAG_WORKFLOW.create({ params: { text } });
-				totalInserted++;
+				// Generate embeddings for all texts in the batch at once
+				const embeddings = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", {
+					text: batch,
+				});
+				
+				if (!embeddings || !embeddings.data || embeddings.data.length !== batch.length) {
+					throw new Error(`Failed to generate embeddings: Expected ${batch.length} embeddings, got ${embeddings?.data?.length || 0}`);
+				}
+				
+				// Prepare vectors for Vectorize
+				const vectors = results.map((record, index) => ({
+					id: record.id.toString(),
+					values: embeddings.data[index],
+				}));
+				
+				// Insert the vectors into Vectorize
+				await c.env.VECTORIZE.upsert(vectors);
+				
+				totalInserted += batch.length;
+				console.log(`  Batch of ${batch.length} texts inserted successfully.`);
+				
+				// Add a small delay between batches to avoid rate limits
+				await new Promise(resolve => setTimeout(resolve, 500));
+				
+			} catch (batchError) {
+				console.error(`Error processing batch: ${batchError.message}`);
+				// Continue with the next batch instead of failing the entire process
+				continue;
 			}
-			
-			console.log(`  Batch of ${batch.length} texts inserted successfully.`);
 		}
 		
 		return Response.json({ 
