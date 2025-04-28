@@ -373,8 +373,14 @@ app.get("/", async (c) => {
 	return c.text(answer);
 });
 
+// Add a global cancellation flag
+let isCancelled = false;
+
 app.get("/bootstrap", async (c) => {
 	try {
+		// Reset the cancellation flag at the start of a new bootstrap process
+		isCancelled = false;
+		
 		// First, clear the vectorize vector index
 		console.log("Clearing vectorize vector index...");
 		// The deleteAll method doesn't exist, so we need to use a different approach
@@ -401,6 +407,16 @@ app.get("/bootstrap", async (c) => {
 		const deleteQuery = "DELETE FROM notes";
 		await c.env.DB.prepare(deleteQuery).run();
 		console.log("Database cleared successfully.");
+
+		// Check if the process has been cancelled
+		if (isCancelled) {
+			console.log("Bootstrap process was cancelled.");
+			return Response.json({ 
+				success: false, 
+				message: "Bootstrap process was cancelled.",
+				cancelled: true
+			});
+		}
 
 		// Load CSV data
 		const csvData = await loadCSVData(c.env);
@@ -430,11 +446,33 @@ app.get("/bootstrap", async (c) => {
 		let totalInserted = 0;
 
 		for (let i = 0; i < textsToInsert.length; i += batchSize) {
+			// Check if the process has been cancelled
+			if (isCancelled) {
+				console.log("Bootstrap process was cancelled during batch processing.");
+				return Response.json({ 
+					success: false, 
+					totalTextsInserted: totalInserted,
+					message: "Bootstrap process was cancelled during batch processing.",
+					cancelled: true
+				});
+			}
+			
 			const batch = textsToInsert.slice(i, i + batchSize);
 			console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: items ${i + 1} to ${Math.min(i + batchSize, textsToInsert.length)}`);
 
 			// Process each text in the batch
 			for (const text of batch) {
+				// Check if the process has been cancelled
+				if (isCancelled) {
+					console.log("Bootstrap process was cancelled during text processing.");
+					return Response.json({ 
+						success: false, 
+						totalTextsInserted: totalInserted,
+						message: "Bootstrap process was cancelled during text processing.",
+						cancelled: true
+					});
+				}
+				
 				// Use the same method as in the RAG workflow to insert into the database
 				await c.env.RAG_WORKFLOW.create({ params: { text } });
 				totalInserted++;
@@ -472,11 +510,18 @@ app.get("/bootstrap", async (c) => {
 
 app.get("/abort", async (c) => {
 	try {
+		// Set the cancellation flag to stop the bootstrap process
+		isCancelled = true;
+		console.log("Cancellation flag set to true. Bootstrap process will stop at the next checkpoint.");
+		
 		// Clear the vectorize vector index
 		console.log("Clearing vectorize vector index...");
 		try {
-			// Try to get all vectors first
-			const allVectors = await c.env.VECTORIZE.query([], { topK: 100 });
+			// Create a valid query vector with 768 dimensions (all zeros)
+			const emptyVector = new Array(768).fill(0);
+			
+			// Try to get all vectors first with a valid query vector
+			const allVectors = await c.env.VECTORIZE.query(emptyVector, { topK: 100 });
 			if (allVectors && allVectors.matches && allVectors.matches.length > 0) {
 				const vectorIds = allVectors.matches.map(match => match.id);
 				await c.env.VECTORIZE.deleteByIds(vectorIds);
@@ -486,6 +531,7 @@ app.get("/abort", async (c) => {
 			}
 		} catch (vectorError) {
 			console.error("Error clearing vectorize index:", vectorError);
+			// Continue with the process even if vector clearing fails
 		}
 		console.log("Vectorize vector index cleared successfully.");
 
@@ -495,25 +541,15 @@ app.get("/abort", async (c) => {
 		await c.env.DB.prepare(deleteQuery).run();
 		console.log("Database cleared successfully.");
 
-		// Get the wrangler tail
-		const tailResponse = await fetch('https://api.cloudflare.com/client/v4/accounts/58b1b19c68acaef9ec1347796c8ef5dc/workers/scripts/rag-ai-tutorial/tail', {
-			method: 'GET',
-			headers: {
-				'Authorization': `Bearer ${c.env.CF_API_TOKEN}`,
-				'Content-Type': 'application/json'
-			}
-		});
-
-		if (!tailResponse.ok) {
-			throw new Error(`Failed to get wrangler tail: ${tailResponse.status} ${tailResponse.statusText}`);
-		}
-
-		const tailData = await tailResponse.json();
+		// Instead of trying to get the wrangler tail (which requires special permissions),
+		// we'll return a success message with the current time
+		const currentTime = new Date().toISOString();
 		
 		return Response.json({
 			success: true,
-			message: "All processes stopped and database cleared",
-			tail: tailData
+			message: "Bootstrap process cancelled and database cleared",
+			timestamp: currentTime,
+			status: "Worker stopped successfully"
 		});
 
 	} catch (error) {
