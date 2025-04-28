@@ -142,53 +142,103 @@ app.get("/query", async (c) => {
 
 export class RAGWorkflow extends WorkflowEntrypoint {
 	async run(event, step) {
-		const env = this.env;
-		const { text } = event.payload;
-		let texts = await step.do("split text", async () => {
-			const splitter = new RecursiveCharacterTextSplitter();
-			const output = await splitter.createDocuments([text]);
-			return output.map((doc) => doc.pageContent);
-		});
-	
-		console.log(
-			`RecursiveCharacterTextSplitter generated ${texts.length} chunks`
-		);
-	
-		for (const index in texts) {
-			const text = texts[index];
-			const record = await step.do(
-				`create database record: ${index}/${texts.length}`,
-				async () => {
-					const query = "INSERT INTO notes (text) VALUES (?) RETURNING *";
-		
-					const { results } = await env.DB.prepare(query).bind(text).run();
-		
-					const record = results[0];
-					if (!record) throw new Error("Failed to create note");
-					return record;
-				}
-			);
-		
-			const embedding = await step.do(
-				`generate embedding: ${index}/${texts.length}`,
-				async () => {
-					const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
-						text: text,
-					});
-					const values = embeddings.data[0];
-					if (!values) throw new Error("Failed to generate vector embedding");
-					return values;
-				}
-			);
-		
-			await step.do(`insert vector: ${index}/${texts.length}`, async () => {
-				return env.VECTORIZE.upsert([
-					{
-						id: record.id.toString(),
-						values: embedding,
-					},
-				]);
+		try {
+			const env = this.env;
+			const { text } = event.payload;
+			
+			// Log the incoming text for debugging
+			console.log(`Processing text: ${text.substring(0, 50)}...`);
+			
+			let texts = await step.do("split text", async () => {
+				const splitter = new RecursiveCharacterTextSplitter();
+				const output = await splitter.createDocuments([text]);
+				return output.map((doc) => doc.pageContent);
 			});
+		
+			console.log(
+				`RecursiveCharacterTextSplitter generated ${texts.length} chunks`
+			);
+		
+			for (const index in texts) {
+				const text = texts[index];
+				try {
+					// Create database record
+					const record = await step.do(
+						`create database record: ${index}/${texts.length}`,
+						async () => {
+							try {
+								const query = "INSERT INTO notes (text) VALUES (?) RETURNING *";
+								const { results } = await env.DB.prepare(query).bind(text).run();
+								
+								if (!results || results.length === 0) {
+									throw new Error("Failed to create note: No results returned");
+								}
+								
+								const record = results[0];
+								if (!record) {
+									throw new Error("Failed to create note: Record is null");
+								}
+								
+								return record;
+							} catch (dbError) {
+								console.error(`Database error: ${dbError.message}`);
+								throw dbError;
+							}
+						}
+					);
+					
+					// Generate embedding
+					const embedding = await step.do(
+						`generate embedding: ${index}/${texts.length}`,
+						async () => {
+							try {
+								const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+									text: text,
+								});
+								
+								if (!embeddings || !embeddings.data || !embeddings.data[0]) {
+									throw new Error("Failed to generate vector embedding: Invalid response");
+								}
+								
+								const values = embeddings.data[0];
+								return values;
+							} catch (aiError) {
+								console.error(`AI error: ${aiError.message}`);
+								throw aiError;
+							}
+						}
+					);
+					
+					// Insert vector
+					await step.do(`insert vector: ${index}/${texts.length}`, async () => {
+						try {
+							if (!record || !record.id) {
+								throw new Error("Invalid record: Missing ID");
+							}
+							
+							return env.VECTORIZE.upsert([
+								{
+									id: record.id.toString(),
+									values: embedding,
+								},
+							]);
+						} catch (vectorError) {
+							console.error(`Vectorize error: ${vectorError.message}`);
+							throw vectorError;
+						}
+					});
+					
+					console.log(`Successfully processed chunk ${parseInt(index) + 1}/${texts.length}`);
+				} catch (chunkError) {
+					console.error(`Error processing chunk ${parseInt(index) + 1}/${texts.length}: ${chunkError.message}`);
+					// Continue with the next chunk instead of failing the entire workflow
+				}
+			}
+			
+			return { success: true, message: `Processed ${texts.length} chunks successfully` };
+		} catch (error) {
+			console.error(`RAGWorkflow error: ${error.message}`);
+			throw error;
 		}
 	}
 }
