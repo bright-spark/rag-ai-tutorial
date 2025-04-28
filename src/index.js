@@ -15,35 +15,56 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
-import csvData from '../dataset.csv';
+// Remove direct CSV import
+// import csvData from '../dataset.csv';
+
+// Function to load CSV data
+async function loadCSVData(env) {
+	try {
+		// Use the static assets binding to get the CSV file
+		const csvAsset = await env.ASSETS.get('dataset.csv');
+		if (!csvAsset) {
+			throw new Error('Failed to load dataset.csv from static assets');
+		}
+		
+		// Convert the asset to text
+		return await csvAsset.text();
+	} catch (error) {
+		console.error("Error loading CSV data:", error);
+		throw error;
+	}
+}
 
 app.post("/upsert", async (c) => {
-	// Parse the CSV data
-	const lines = csvData.trim().split('\n');
-	const textsToEmbed = lines.map((line) => {
-		if (line.length < 3) return ''; // Handle potentially empty lines or just ","
-		// Remove surrounding quotes and trailing comma: "...", -> ...
-		// Note: This assumes the Python script correctly handled internal quotes.
-		// If internal quotes were doubled (" -> ""), use: .replace(/""/g, '"')
-		let content = line.slice(1, -2); 
-		// Optionally unescape doubled quotes if the Python script did that:
-		// content = content.replace(/""/g, '"');
-		return content;
-	}).filter((text) => text && text.length > 0); // Filter out any empty strings
-
-	// Check if we actually got any text
-	if (textsToEmbed.length === 0) {
-		console.error("No text data found or parsed from dataset.csv");
-		return new Response("No text data found in CSV to insert.", { status: 400 });
-	}
-
-	console.log(`Total text snippets to process: ${textsToEmbed.length}`);
-
-	const batchSize = 200; // Process in batches of 200
-	let totalInserted = 0;
-	let vectorIdCounter = 1; // Ensure unique IDs across batches
-
 	try {
+		// Load CSV data
+		const csvData = await loadCSVData(c.env);
+		
+		// Parse the CSV data
+		const lines = csvData.trim().split('\n');
+		const textsToEmbed = lines.map((line) => {
+			if (line.length < 3) return ''; // Handle potentially empty lines or just ","
+			// Remove surrounding quotes and trailing comma: "...", -> ...
+			// Note: This assumes the Python script correctly handled internal quotes.
+			// If internal quotes were doubled (" -> ""), use: .replace(/""/g, '"')
+			let content = line.slice(1, -2); 
+			// Optionally unescape doubled quotes if the Python script did that:
+			// content = content.replace(/""/g, '"');
+			return content;
+		}).filter((text) => text && text.length > 0); // Filter out any empty strings
+
+		// Check if we actually got any text
+		if (textsToEmbed.length === 0) {
+			console.error("No text data found or parsed from dataset.csv");
+			return new Response("No text data found in CSV to insert.", { status: 400 });
+		}
+
+		console.log(`Total text snippets to process: ${textsToEmbed.length}`);
+
+		const batchSize = 200; // Process in batches of 200
+		let totalInserted = 0;
+		let vectorIdCounter = 1; // Ensure unique IDs across batches
+
 		for (let i = 0; i < textsToEmbed.length; i += batchSize) {
 			const batch = textsToEmbed.slice(i, i + batchSize);
 			console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: items ${i + 1} to ${Math.min(i + batchSize, textsToEmbed.length)}`);
@@ -264,6 +285,9 @@ app.post("/injest", async (c) => {
 		await c.env.DB.prepare(deleteQuery).run();
 		console.log("Database cleared successfully.");
 
+		// Load CSV data
+		const csvData = await loadCSVData(c.env);
+		
 		// Parse the CSV data
 		const lines = csvData.trim().split('\n');
 		const textsToInsert = lines.map((line) => {
