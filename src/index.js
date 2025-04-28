@@ -381,8 +381,12 @@ app.get("/bootstrap", async (c) => {
 		// Reset the cancellation flag at the start of a new bootstrap process
 		isCancelled = false;
 		
+		console.log("=== BOOTSTRAP PROCESS STARTED ===");
+		const startTime = new Date();
+		console.log(`Start time: ${startTime.toISOString()}`);
+		
 		// First, clear the vectorize vector index
-		console.log("Clearing vectorize vector index...");
+		console.log("Step 1/4: Clearing vectorize vector index...");
 		// The deleteAll method doesn't exist, so we need to use a different approach
 		// We'll use the deleteByIds method with an empty array to clear all vectors
 		// or we can use the query method to get all IDs and then delete them
@@ -392,25 +396,25 @@ app.get("/bootstrap", async (c) => {
 			if (allVectors && allVectors.matches && allVectors.matches.length > 0) {
 				const vectorIds = allVectors.matches.map(match => match.id);
 				await c.env.VECTORIZE.deleteByIds(vectorIds);
-				console.log(`Deleted ${vectorIds.length} vectors from the index.`);
+				console.log(`✓ Deleted ${vectorIds.length} vectors from the index.`);
 			} else {
-				console.log("No vectors found in the index to delete.");
+				console.log("✓ No vectors found in the index to delete.");
 			}
 		} catch (vectorError) {
 			console.error("Error clearing vectorize index:", vectorError);
 			// Continue with the process even if vector clearing fails
 		}
-		console.log("Vectorize vector index cleared successfully.");
+		console.log("✓ Vectorize vector index cleared successfully.");
 
 		// Then, clear the database
-		console.log("Clearing database...");
+		console.log("Step 2/4: Clearing database...");
 		const deleteQuery = "DELETE FROM notes";
 		await c.env.DB.prepare(deleteQuery).run();
-		console.log("Database cleared successfully.");
+		console.log("✓ Database cleared successfully.");
 
 		// Check if the process has been cancelled
 		if (isCancelled) {
-			console.log("Bootstrap process was cancelled.");
+			console.log("❌ Bootstrap process was cancelled.");
 			return Response.json({ 
 				success: false, 
 				message: "Bootstrap process was cancelled.",
@@ -419,9 +423,12 @@ app.get("/bootstrap", async (c) => {
 		}
 
 		// Load CSV data
+		console.log("Step 3/4: Loading CSV data...");
 		const csvData = await loadCSVData(c.env);
+		console.log("✓ CSV data loaded successfully.");
 		
 		// Parse the CSV data
+		console.log("Parsing CSV data...");
 		const lines = csvData.trim().split('\n');
 		const textsToInsert = lines.map((line) => {
 			if (line.length < 3) return ''; // Handle potentially empty lines or just ","
@@ -436,20 +443,109 @@ app.get("/bootstrap", async (c) => {
 
 		// Check if we actually got any text
 		if (textsToInsert.length === 0) {
-			console.error("No text data found or parsed from dataset.csv");
+			console.error("❌ No text data found or parsed from dataset.csv");
 			return new Response("No text data found in CSV to insert.", { status: 400 });
 		}
 
-		console.log(`Total text snippets to process: ${textsToInsert.length}`);
+		console.log(`✓ Parsed ${textsToInsert.length} text snippets from CSV.`);
+		console.log("Step 4/4: Processing text snippets...");
 
 		// Reduce batch size to avoid hitting rate limits
 		const batchSize = 10; // Smaller batch size to reduce API calls
 		let totalInserted = 0;
+		let totalBatches = Math.ceil(textsToInsert.length / batchSize);
+		let successfulBatches = 0;
+		let failedBatches = 0;
+		let lastProgressUpdate = Date.now();
+		let recordsProcessed = 0;
+		let startProcessingTime = new Date();
+
+		// Function to format elapsed time
+		const formatElapsedTime = (startTime, endTime) => {
+			const elapsedMs = endTime - startTime;
+			const seconds = Math.floor(elapsedMs / 1000);
+			const minutes = Math.floor(seconds / 60);
+			const hours = Math.floor(minutes / 60);
+			
+			if (hours > 0) {
+				return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+			} else if (minutes > 0) {
+				return `${minutes}m ${seconds % 60}s`;
+			} else {
+				return `${seconds}s`;
+			}
+		};
+
+		// Function to estimate remaining time
+		const estimateRemainingTime = (processed, total, elapsedMs) => {
+			if (processed === 0) return "Calculating...";
+			
+			const itemsPerMs = processed / elapsedMs;
+			const remainingItems = total - processed;
+			const remainingMs = remainingItems / itemsPerMs;
+			
+			return formatElapsedTime(0, remainingMs);
+		};
+
+		// Function to calculate estimated completion time
+		const calculateEstimatedCompletionTime = (startTime, processed, total, elapsedMs) => {
+			if (processed === 0) return "Calculating...";
+			
+			const itemsPerMs = processed / elapsedMs;
+			const remainingItems = total - processed;
+			const remainingMs = remainingItems / itemsPerMs;
+			
+			const completionTime = new Date(startTime.getTime() + remainingMs);
+			return completionTime.toLocaleTimeString();
+		};
+
+		// Calculate initial estimated completion time
+		// We'll use a sample batch to estimate the processing time
+		console.log("Calculating initial time estimate...");
+		const sampleBatchSize = Math.min(5, textsToInsert.length);
+		const sampleBatch = textsToInsert.slice(0, sampleBatchSize);
+		const sampleStartTime = new Date();
+		
+		try {
+			// Process a sample batch to estimate time
+			const placeholders = sampleBatch.map(() => "(?)").join(", ");
+			const insertQuery = `INSERT INTO notes (text) VALUES ${placeholders} RETURNING *`;
+			const { results } = await c.env.DB.prepare(insertQuery).bind(...sampleBatch).run();
+			
+			const embeddings = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", {
+				text: sampleBatch,
+			});
+			
+			const vectors = results.map((record, index) => ({
+				id: record.id.toString(),
+				values: embeddings.data[index],
+			}));
+			
+			await c.env.VECTORIZE.upsert(vectors);
+			
+			const sampleEndTime = new Date();
+			const sampleElapsedMs = sampleEndTime - sampleStartTime;
+			const estimatedTotalMs = (sampleElapsedMs / sampleBatchSize) * textsToInsert.length;
+			const estimatedCompletionTime = new Date(startTime.getTime() + estimatedTotalMs);
+			
+			console.log(`Initial estimate: Processing ${textsToInsert.length} records will take approximately ${formatElapsedTime(0, estimatedTotalMs)}`);
+			console.log(`Estimated completion time: ${estimatedCompletionTime.toLocaleTimeString()} (${estimatedCompletionTime.toLocaleDateString()})`);
+			
+			// Clean up the sample batch
+			const sampleIds = results.map(record => record.id.toString());
+			await c.env.VECTORIZE.deleteByIds(sampleIds);
+			const deleteSampleQuery = `DELETE FROM notes WHERE id IN (${sampleIds.join(',')})`;
+			await c.env.DB.prepare(deleteSampleQuery).run();
+			
+		} catch (sampleError) {
+			console.error(`Error during sample processing: ${sampleError.message}`);
+			console.log("Could not calculate initial time estimate. Will update as processing continues.");
+		}
 
 		for (let i = 0; i < textsToInsert.length; i += batchSize) {
 			// Check if the process has been cancelled
 			if (isCancelled) {
-				console.log("Bootstrap process was cancelled during batch processing.");
+				console.log("❌ Bootstrap process was cancelled during batch processing.");
 				return Response.json({ 
 					success: false, 
 					totalTextsInserted: totalInserted,
@@ -459,11 +555,26 @@ app.get("/bootstrap", async (c) => {
 			}
 			
 			const batch = textsToInsert.slice(i, i + batchSize);
-			console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: items ${i + 1} to ${Math.min(i + batchSize, textsToInsert.length)}`);
+			const batchNumber = Math.floor(i / batchSize) + 1;
+			const progressPercent = Math.round((i / textsToInsert.length) * 100);
+			const currentTime = new Date();
+			const elapsedTime = formatElapsedTime(startProcessingTime, currentTime);
+			const remainingTime = estimateRemainingTime(i, textsToInsert.length, currentTime - startProcessingTime);
+			const estimatedCompletionTime = calculateEstimatedCompletionTime(currentTime, i, textsToInsert.length, currentTime - startProcessingTime);
+			
+			// Log progress every 5 seconds or at significant milestones
+			const now = Date.now();
+			if (now - lastProgressUpdate > 5000 || progressPercent % 10 === 0) {
+				console.log(`Progress: ${progressPercent}% | Time: ${elapsedTime} | ETA: ${remainingTime} | Est. Completion: ${estimatedCompletionTime} | Processed: ${i}/${textsToInsert.length} records | Batches: ${batchNumber}/${totalBatches}`);
+				lastProgressUpdate = now;
+			}
+			
+			console.log(`Processing batch ${batchNumber}/${totalBatches}: items ${i + 1} to ${Math.min(i + batchSize, textsToInsert.length)}`);
 
 			// Process the batch directly instead of making individual API calls
 			try {
 				// Insert all texts in the batch directly into the database
+				console.log(`  - Inserting ${batch.length} texts into database...`);
 				const placeholders = batch.map(() => "(?)").join(", ");
 				const insertQuery = `INSERT INTO notes (text) VALUES ${placeholders} RETURNING *`;
 				
@@ -474,6 +585,7 @@ app.get("/bootstrap", async (c) => {
 					throw new Error("Failed to insert texts: No results returned");
 				}
 				
+				console.log(`  - Generating embeddings for ${batch.length} texts...`);
 				// Generate embeddings for all texts in the batch at once
 				const embeddings = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", {
 					text: batch,
@@ -483,6 +595,7 @@ app.get("/bootstrap", async (c) => {
 					throw new Error(`Failed to generate embeddings: Expected ${batch.length} embeddings, got ${embeddings?.data?.length || 0}`);
 				}
 				
+				console.log(`  - Inserting ${batch.length} vectors into Vectorize...`);
 				// Prepare vectors for Vectorize
 				const vectors = results.map((record, index) => ({
 					id: record.id.toString(),
@@ -493,21 +606,51 @@ app.get("/bootstrap", async (c) => {
 				await c.env.VECTORIZE.upsert(vectors);
 				
 				totalInserted += batch.length;
-				console.log(`  Batch of ${batch.length} texts inserted successfully.`);
+				recordsProcessed += batch.length;
+				successfulBatches++;
+				
+				const batchEndTime = new Date();
+				const batchElapsedTime = formatElapsedTime(currentTime, batchEndTime);
+				
+				console.log(`  ✓ Batch ${batchNumber}/${totalBatches} processed successfully in ${batchElapsedTime}. Total inserted: ${totalInserted}/${textsToInsert.length}`);
 				
 				// Add a small delay between batches to avoid rate limits
 				await new Promise(resolve => setTimeout(resolve, 500));
 				
 			} catch (batchError) {
-				console.error(`Error processing batch: ${batchError.message}`);
+				console.error(`  ❌ Error processing batch ${batchNumber}/${totalBatches}: ${batchError.message}`);
+				failedBatches++;
 				// Continue with the next batch instead of failing the entire process
 				continue;
 			}
 		}
 		
+		const endTime = new Date();
+		const durationMs = endTime.getTime() - startTime.getTime();
+		const durationSeconds = Math.round(durationMs / 1000);
+		const totalElapsedTime = formatElapsedTime(startTime, endTime);
+		
+		console.log("=== BOOTSTRAP PROCESS COMPLETED ===");
+		console.log(`End time: ${endTime.toISOString()}`);
+		console.log(`Total duration: ${totalElapsedTime}`);
+		console.log(`Total batches: ${totalBatches}`);
+		console.log(`Successful batches: ${successfulBatches}`);
+		console.log(`Failed batches: ${failedBatches}`);
+		console.log(`Total records processed: ${recordsProcessed}/${textsToInsert.length}`);
+		console.log(`Processing rate: ${Math.round(recordsProcessed / (durationMs / 1000))} records/second`);
+		
 		return Response.json({ 
 			success: true, 
 			totalTextsInserted: totalInserted,
+			totalBatches,
+			successfulBatches,
+			failedBatches,
+			durationSeconds,
+			totalElapsedTime,
+			recordsProcessed,
+			processingRate: Math.round(recordsProcessed / (durationMs / 1000)),
+			startTime: startTime.toISOString(),
+			endTime: endTime.toISOString(),
 			message: `Successfully cleared existing data and inserted ${totalInserted} texts into the database.`
 		});
 
@@ -515,7 +658,7 @@ app.get("/bootstrap", async (c) => {
 		// Error handling
 		let errorMessage = "An unknown error occurred during batch processing.";
 		if (error instanceof Error) {
-			console.error(`Error during batch processing: ${error.message}`);
+			console.error(`❌ Error during batch processing: ${error.message}`);
 			errorMessage = error.message;
 			// Check if error has more details in cause
 			if (error.cause) {
