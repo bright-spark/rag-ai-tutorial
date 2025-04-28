@@ -276,7 +276,23 @@ app.get("/bootstrap", async (c) => {
 	try {
 		// First, clear the vectorize vector index
 		console.log("Clearing vectorize vector index...");
-		await c.env.VECTORIZE.deleteAll();
+		// The deleteAll method doesn't exist, so we need to use a different approach
+		// We'll use the deleteByIds method with an empty array to clear all vectors
+		// or we can use the query method to get all IDs and then delete them
+		try {
+			// Try to get all vectors first
+			const allVectors = await c.env.VECTORIZE.query([], { topK: 10000 });
+			if (allVectors && allVectors.matches && allVectors.matches.length > 0) {
+				const vectorIds = allVectors.matches.map(match => match.id);
+				await c.env.VECTORIZE.deleteByIds(vectorIds);
+				console.log(`Deleted ${vectorIds.length} vectors from the index.`);
+			} else {
+				console.log("No vectors found in the index to delete.");
+			}
+		} catch (vectorError) {
+			console.error("Error clearing vectorize index:", vectorError);
+			// Continue with the process even if vector clearing fails
+		}
 		console.log("Vectorize vector index cleared successfully.");
 
 		// Then, clear the database
