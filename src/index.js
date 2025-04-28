@@ -22,13 +22,14 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 async function loadCSVData(env) {
 	try {
 		// Use the static assets binding to get the CSV file
-		const csvAsset = await env.ASSETS.get('dataset.csv');
-		if (!csvAsset) {
-			throw new Error('Failed to load dataset.csv from static assets');
+		// The correct method is fetch, not get
+		const csvResponse = await env.ASSETS.fetch(new Request('https://example.com/dataset.csv'));
+		if (!csvResponse.ok) {
+			throw new Error(`Failed to load dataset.csv from static assets: ${csvResponse.status} ${csvResponse.statusText}`);
 		}
 		
-		// Convert the asset to text
-		return await csvAsset.text();
+		// Convert the response to text
+		return await csvResponse.text();
 	} catch (error) {
 		console.error("Error loading CSV data:", error);
 		throw error;
