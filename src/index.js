@@ -376,10 +376,36 @@ app.get("/", async (c) => {
 // Add a global cancellation flag
 let isCancelled = false;
 
+// Add a global variable to track bootstrap progress
+let bootstrapProgress = {
+	isRunning: false,
+	startTime: null,
+	totalRecords: 0,
+	processedRecords: 0,
+	currentBatch: 0,
+	totalBatches: 0,
+	estimatedCompletionTime: null,
+	lastUpdate: null,
+	status: "Not started"
+};
+
 app.get("/bootstrap", async (c) => {
 	try {
 		// Reset the cancellation flag at the start of a new bootstrap process
 		isCancelled = false;
+		
+		// Initialize bootstrap progress tracking
+		bootstrapProgress = {
+			isRunning: true,
+			startTime: new Date(),
+			totalRecords: 0,
+			processedRecords: 0,
+			currentBatch: 0,
+			totalBatches: 0,
+			estimatedCompletionTime: null,
+			lastUpdate: new Date(),
+			status: "Initializing"
+		};
 		
 		console.log("=== BOOTSTRAP PROCESS STARTED ===");
 		const startTime = new Date();
@@ -387,12 +413,13 @@ app.get("/bootstrap", async (c) => {
 		
 		// First, clear the vectorize vector index
 		console.log("Step 1/4: Clearing vectorize vector index...");
+		bootstrapProgress.status = "Clearing vector index";
 		// The deleteAll method doesn't exist, so we need to use a different approach
 		// We'll use the deleteByIds method with an empty array to clear all vectors
 		// or we can use the query method to get all IDs and then delete them
 		try {
 			// Try to get all vectors first
-			const allVectors = await c.env.VECTORIZE.query([], { topK: 10000 });
+			const allVectors = await c.env.VECTORIZE.query([], { topK: 100 });
 			if (allVectors && allVectors.matches && allVectors.matches.length > 0) {
 				const vectorIds = allVectors.matches.map(match => match.id);
 				await c.env.VECTORIZE.deleteByIds(vectorIds);
@@ -408,6 +435,7 @@ app.get("/bootstrap", async (c) => {
 
 		// Then, clear the database
 		console.log("Step 2/4: Clearing database...");
+		bootstrapProgress.status = "Clearing database";
 		const deleteQuery = "DELETE FROM notes";
 		await c.env.DB.prepare(deleteQuery).run();
 		console.log("✓ Database cleared successfully.");
@@ -415,6 +443,8 @@ app.get("/bootstrap", async (c) => {
 		// Check if the process has been cancelled
 		if (isCancelled) {
 			console.log("❌ Bootstrap process was cancelled.");
+			bootstrapProgress.status = "Cancelled";
+			bootstrapProgress.isRunning = false;
 			return Response.json({ 
 				success: false, 
 				message: "Bootstrap process was cancelled.",
@@ -424,6 +454,7 @@ app.get("/bootstrap", async (c) => {
 
 		// Load CSV data
 		console.log("Step 3/4: Loading CSV data...");
+		bootstrapProgress.status = "Loading CSV data";
 		const csvData = await loadCSVData(c.env);
 		console.log("✓ CSV data loaded successfully.");
 		
@@ -444,16 +475,21 @@ app.get("/bootstrap", async (c) => {
 		// Check if we actually got any text
 		if (textsToInsert.length === 0) {
 			console.error("❌ No text data found or parsed from dataset.csv");
+			bootstrapProgress.status = "Failed: No text data found";
+			bootstrapProgress.isRunning = false;
 			return new Response("No text data found in CSV to insert.", { status: 400 });
 		}
 
 		console.log(`✓ Parsed ${textsToInsert.length} text snippets from CSV.`);
 		console.log("Step 4/4: Processing text snippets...");
+		bootstrapProgress.status = "Processing text snippets";
+		bootstrapProgress.totalRecords = textsToInsert.length;
 
 		// Reduce batch size to avoid hitting rate limits
 		const batchSize = 10; // Smaller batch size to reduce API calls
 		let totalInserted = 0;
 		let totalBatches = Math.ceil(textsToInsert.length / batchSize);
+		bootstrapProgress.totalBatches = totalBatches;
 		let successfulBatches = 0;
 		let failedBatches = 0;
 		let lastProgressUpdate = Date.now();
@@ -502,6 +538,7 @@ app.get("/bootstrap", async (c) => {
 		// Calculate initial estimated completion time
 		// We'll use a sample batch to estimate the processing time
 		console.log("Calculating initial time estimate...");
+		bootstrapProgress.status = "Calculating initial time estimate";
 		const sampleBatchSize = Math.min(5, textsToInsert.length);
 		const sampleBatch = textsToInsert.slice(0, sampleBatchSize);
 		const sampleStartTime = new Date();
@@ -531,6 +568,10 @@ app.get("/bootstrap", async (c) => {
 			console.log(`Initial estimate: Processing ${textsToInsert.length} records will take approximately ${formatElapsedTime(0, estimatedTotalMs)}`);
 			console.log(`Estimated completion time: ${estimatedCompletionTime.toLocaleTimeString()} (${estimatedCompletionTime.toLocaleDateString()})`);
 			
+			// Update bootstrap progress with initial estimate
+			bootstrapProgress.estimatedCompletionTime = estimatedCompletionTime.toISOString();
+			bootstrapProgress.status = "Processing batches";
+			
 			// Clean up the sample batch
 			const sampleIds = results.map(record => record.id.toString());
 			await c.env.VECTORIZE.deleteByIds(sampleIds);
@@ -540,12 +581,15 @@ app.get("/bootstrap", async (c) => {
 		} catch (sampleError) {
 			console.error(`Error during sample processing: ${sampleError.message}`);
 			console.log("Could not calculate initial time estimate. Will update as processing continues.");
+			bootstrapProgress.status = "Processing batches (no initial estimate)";
 		}
 
 		for (let i = 0; i < textsToInsert.length; i += batchSize) {
 			// Check if the process has been cancelled
 			if (isCancelled) {
 				console.log("❌ Bootstrap process was cancelled during batch processing.");
+				bootstrapProgress.status = "Cancelled during processing";
+				bootstrapProgress.isRunning = false;
 				return Response.json({ 
 					success: false, 
 					totalTextsInserted: totalInserted,
@@ -561,6 +605,12 @@ app.get("/bootstrap", async (c) => {
 			const elapsedTime = formatElapsedTime(startProcessingTime, currentTime);
 			const remainingTime = estimateRemainingTime(i, textsToInsert.length, currentTime - startProcessingTime);
 			const estimatedCompletionTime = calculateEstimatedCompletionTime(currentTime, i, textsToInsert.length, currentTime - startProcessingTime);
+			
+			// Update bootstrap progress
+			bootstrapProgress.currentBatch = batchNumber;
+			bootstrapProgress.processedRecords = i;
+			bootstrapProgress.lastUpdate = new Date();
+			bootstrapProgress.estimatedCompletionTime = new Date(currentTime.getTime() + (remainingTime.includes("Calculating") ? 0 : parseInt(remainingTime) * 1000)).toISOString();
 			
 			// Log progress every 5 seconds or at significant milestones
 			const now = Date.now();
@@ -639,6 +689,13 @@ app.get("/bootstrap", async (c) => {
 		console.log(`Total records processed: ${recordsProcessed}/${textsToInsert.length}`);
 		console.log(`Processing rate: ${Math.round(recordsProcessed / (durationMs / 1000))} records/second`);
 		
+		// Update bootstrap progress to completed
+		bootstrapProgress.isRunning = false;
+		bootstrapProgress.status = "Completed";
+		bootstrapProgress.processedRecords = textsToInsert.length;
+		bootstrapProgress.currentBatch = totalBatches;
+		bootstrapProgress.lastUpdate = endTime;
+		
 		return Response.json({ 
 			success: true, 
 			totalTextsInserted: totalInserted,
@@ -671,7 +728,106 @@ app.get("/bootstrap", async (c) => {
 		} else {
 			console.error("An unexpected error type occurred:", error);
 		}
+		
+		// Update bootstrap progress to failed
+		bootstrapProgress.isRunning = false;
+		bootstrapProgress.status = `Failed: ${errorMessage}`;
+		
 		return new Response(`Error during batch processing: ${errorMessage}`, { status: 500 });
+	}
+});
+
+// Add a new endpoint to check bootstrap progress
+app.get("/progress", async (c) => {
+	try {
+		// Get current database and vector counts
+		const dbCountQuery = "SELECT COUNT(*) as count FROM notes";
+		const dbResult = await c.env.DB.prepare(dbCountQuery).first();
+		const dbRecordCount = dbResult ? dbResult.count : 0;
+		
+		// Get vector count
+		let vectorCount = 0;
+		try {
+			const emptyVector = new Array(768).fill(0);
+			const vectorResult = await c.env.VECTORIZE.query(emptyVector, { topK: 100 });
+			
+			if (vectorResult && vectorResult.matches) {
+				if (vectorResult.matches.length === 100) {
+					vectorCount = dbRecordCount; // Use DB count as fallback
+				} else {
+					vectorCount = vectorResult.matches.length;
+				}
+			}
+		} catch (vectorError) {
+			vectorCount = dbRecordCount; // Use DB count as fallback
+		}
+		
+		// Calculate progress percentage if bootstrap is running
+		let progressPercent = 0;
+		if (bootstrapProgress.isRunning && bootstrapProgress.totalRecords > 0) {
+			progressPercent = Math.round((bootstrapProgress.processedRecords / bootstrapProgress.totalRecords) * 100);
+		}
+		
+		// Format elapsed time if bootstrap is running
+		let elapsedTime = "N/A";
+		if (bootstrapProgress.isRunning && bootstrapProgress.startTime) {
+			const startTime = new Date(bootstrapProgress.startTime);
+			const currentTime = new Date();
+			const elapsedMs = currentTime - startTime;
+			
+			const seconds = Math.floor(elapsedMs / 1000);
+			const minutes = Math.floor(seconds / 60);
+			const hours = Math.floor(minutes / 60);
+			
+			if (hours > 0) {
+				elapsedTime = `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+			} else if (minutes > 0) {
+				elapsedTime = `${minutes}m ${seconds % 60}s`;
+			} else {
+				elapsedTime = `${seconds}s`;
+			}
+		}
+		
+		// Format estimated completion time
+		let estimatedCompletion = "N/A";
+		if (bootstrapProgress.estimatedCompletionTime) {
+			const completionTime = new Date(bootstrapProgress.estimatedCompletionTime);
+			estimatedCompletion = completionTime.toLocaleTimeString();
+		}
+		
+		// Prepare the response
+		const progress = {
+			isRunning: bootstrapProgress.isRunning,
+			status: bootstrapProgress.status,
+			progress: {
+				percent: progressPercent,
+				processed: bootstrapProgress.processedRecords,
+				total: bootstrapProgress.totalRecords,
+				currentBatch: bootstrapProgress.currentBatch,
+				totalBatches: bootstrapProgress.totalBatches
+			},
+			timing: {
+				startTime: bootstrapProgress.startTime ? new Date(bootstrapProgress.startTime).toISOString() : null,
+				elapsedTime: elapsedTime,
+				estimatedCompletion: estimatedCompletion,
+				lastUpdate: bootstrapProgress.lastUpdate ? new Date(bootstrapProgress.lastUpdate).toISOString() : null
+			},
+			counts: {
+				database: dbRecordCount,
+				vectors: vectorCount,
+				countsMatch: dbRecordCount === vectorCount
+			}
+		};
+		
+		return Response.json(progress);
+		
+	} catch (error) {
+		console.error("Error in /progress endpoint:", error);
+		return Response.json({
+			success: false,
+			message: `Error getting progress: ${error.message}`,
+			error: error.message
+		}, { status: 500 });
 	}
 });
 
